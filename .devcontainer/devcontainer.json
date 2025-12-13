@@ -1,0 +1,33 @@
+{
+    "name": "Zephyr dev container",
+    "build": {
+        "context": "..",
+        "dockerfile": "Dockerfile",
+    },
+    "remoteUser": "newuser",
+    "mounts": [
+        {
+            "source": "${env:HOME}/.gitconfig",
+            "target": "/root/.gitconfig",
+            "type": "bind",
+            "consistency": "cached",
+            "readOnly": true,
+            "options": "bind-propagation=r"
+        }
+    ],
+    "settings": {
+        "terminal.integrated.shell.linux": "bash"
+    },
+    "extensions": [
+        "ms-python.python",
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.makefile-tools",
+        "github.vscode-pull-request-github",
+        "yocto-project.yocto-bitbake"
+    ],
+    "forwardPorts": [80, 443, 1234],
+    "workspaceFolder": "/home/newuser/poky",
+    "postCreateCommand": "git config --global --add safe.directory /home/newuser/poky"
+}
