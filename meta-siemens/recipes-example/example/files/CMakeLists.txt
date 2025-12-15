@@ -1,12 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
-project(button-led)
+project(button-led-proj)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Поиск libgpiod
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GPIOD REQUIRED IMPORTED_TARGET libgpiod)
+find_library(GPIOD_LIB NAMES gpiod)
+find_library(GPIODCXX_LIB NAMES gpiodcxx)
+
+if(NOT GPIOD_LIB OR NOT GPIODCXX_LIB)
+    message(FATAL_ERROR "GPIO libraries not found")
+endif()
 
 # Исходные файлы
 set(SOURCES
@@ -15,17 +18,11 @@ set(SOURCES
 
 # Исполняемый файл
 add_executable(button-led ${SOURCES})
-target_link_libraries(button-led PkgConfig::GPIOD)
+
+target_link_libraries(button-led PRIVATE ${GPIOD_LIB} ${GPIODCXX_LIB})
 
 # Установка
 install(TARGETS button-led
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
 )
-
-# Установка systemd сервиса (опционально)
-# if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/button-led.service")
-#     install(FILES button-led.service
-#         DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/systemd/system
-#     )
-# endif()
