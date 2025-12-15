@@ -1,0 +1,12 @@
+#Inside the docker container edit/add to files below:
+
+# add to build/conf/bblayers.conf:
+# Comment the next one:
+## BBLAYERS += "${BSPDIR}/sources/meta-nxp-demo-experience"
+## BBLAYERS += "${BSPDIR}/sources/meta-nxp-connectivity/meta-nxp-matter-baseline"
+## BBLAYERS += "${BSPDIR}/sources/meta-nxp-connectivity/meta-nxp-openthread"
+# Add at the end of file:
+# BBLAYERS += "${BSPDIR}/sources/meta-siemens"
+
+# Add in the build/conf/local.conf:
+# IMAGE_INSTALL:append = " libgpiod libgpiod-dev libgpiod-tools button-led"

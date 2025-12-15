@@ -33,3 +33,5 @@ RUN mkdir -p imx-yocto-bsp
 
 WORKDIR /home/${USERNAME}/imx-yocto-bsp
 RUN repo init -u https://github.com/SoMLabs/imx-meta-somlabs -b walnascar -m imx-somlabs-6.12.34-2.1.0.xml || echo "Init completed (repo sync needed)"
+
+COPY ./meta-siemens/ sources/
