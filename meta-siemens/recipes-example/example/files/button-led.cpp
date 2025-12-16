@@ -1,110 +1,64 @@
 #include <iostream>
 #include <fstream>
-#include <thread>
 #include <chrono>
-#include <atomic>
 #include <csignal>
-#include <string>
 #include <gpiod.hpp> // ver 2.2.1
 
+#include "button-led.hpp"
+
 // // Конфигурация
-constexpr int LED_GPIO = 12;      // GPIO для светодиода (через sysfs)
-constexpr int BUTTON_GPIO = 8;   // GPIO для кнопки (через libgpiod)
-constexpr int BUTTON_CHIP = 0;   // Номер чипа gpio
+constexpr int LED_GPIO = 12;
+constexpr int BUTTON_GPIO = 8;   
+constexpr int BUTTON_CHIP = 0;
 
-class SysfsLedController {
-private:
-    std::string ledPath;
-    std::string ledName;
-    std::atomic<bool> blinking{false};
-    std::thread blinkThread;
-    
-public:
-    // Конструктор с именем LED (например "LED-IO-12")
-    SysfsLedController(const std::string& led_name) : ledName(led_name) {
-        ledPath = "/sys/class/leds/" + ledName;
+SysfsLedController::SysfsLedController(const std::string& led_name) : ledName(led_name) {
+    ledPath = "/sys/class/leds/" + ledName;
         
-        // if (!isAvailable()) {
-        //     std::cerr << "Error: LED '" << ledName << "' not available!" << std::endl;
-        //     throw std::runtime_error("LED not available");
-        // }
-        
-        std::cout << "LED '" << ledName << "' initialized" << std::endl;
-    }
+    std::cout << "LED '" << ledName << "' initialized" << std::endl;
+}
 
-    bool led_set(char val){
-        try {
-            std::ofstream brightnessFile(ledPath + "/brightness");
-            brightnessFile << std::to_string(val);
-            brightnessFile.close();
-            return true;
-        }
-        catch(...){
+bool SysfsLedController::led_set(const char val){
+    try {
+        auto brightnessFile = std::make_unique<std::ofstream>(ledPath + "/brightness");
+        if (!brightnessFile->is_open()) {
             return false;
         }
+        brightness_ = val;
+        *brightnessFile << static_cast<int>(brightness_);
+        std::cout << ledName << " sent value " << brightness_ << std::endl;
+        return true;
     }
-    
-    ~SysfsLedController() {
-        // stopBlinking();
-        // turnOff();
+    catch(...){
+        return false;
     }
-};
+}
 
-// class ButtonLibgpiod {
-// private:
-//     bool initialized_;
-//     int line_number_;
-//     int chip_number_;
-//     int poll_interval_ms_;
-//     gpiod::chip chip_;
-//     gpiod::line_request request_;
+bool SysfsLedController::toggle(){
+        if(brightness_){
+            brightness_ = 0;
+        }
+        else{
+            brightness_ = 0xFF;
+        }
+    return led_set(brightness_);
+}
 
-// public:
-//     ButtonLibgpiod(const int chip, const int line, const int poll_interval_ms = 50) 
-//     :   initialized_(false), 
-//         line_number_(line), 
-//         chip_number_(chip),
-//         poll_interval_ms_(poll_interval_ms),
-//         chip_(std::string("dev/gpiochip") + std::to_string(chip))
-//     {
-        
-//             try {
-//                 auto builder = chip_.prepare_request();
-//                 gpiod::request_config req_config;
-//                 req_config.set_consumer("button-monitor");
+bool SysfsLedController::switchON(){
+    brightness_ = 0xFF;
+    return led_set(brightness_);
+}
 
-//                 // gpiod::line_settings settings;
-//                 // settings.set_direction(gpiod::line_settings::DIRECTION_INPUT);
+bool SysfsLedController::switchOFF(){
+    brightness_ = 0;
+    return led_set(brightness_);
+}
 
-//                 gpiod::line_config line_config;
-//                 // line_config.add_line_settings(line_number_, settings);
+SysfsLedController::~SysfsLedController() {
+    switchOFF();
+    // stopBlinking();
+    // turnOff(); // Гарантированно выключаем при выходе
+}
 
-//                 // builder.set_request_config(req_config);
-//                 // builder.set_line_config(line_config);
-
-//                 request_ = builder.do_request();
-
-                
-//                 initialized_ = true;
-//                 std::cout << "Button initialized: GPIO" << line_number_ 
-//                         << " on chip " << chip_number_ << std::endl;
-                
-//             } catch (const std::exception& e) {
-//                 std::cerr << "Button init error: " << e.what() << std::endl;
-//                 throw;
-//             }
-//     }
-    
-//     bool isPressed() const {
-//         return 0;//line_.get_value() == 0;
-//     }
-    
-//     ~ButtonLibgpiod() {
-//         if (initialized_) {
-//             // line_.release();
-//         }
-//     }
-// };
 
 class SimpleButton {
 private:
@@ -116,7 +70,6 @@ public:
     SimpleButton(int gpio_number, bool active_low = true)
         : gpio_number_(gpio_number), active_low_(active_low) {
         
-        // Экспортируем GPIO
         std::ofstream export_file("/sys/class/gpio/export");
         if (export_file.is_open()) {
             export_file << gpio_number_;
@@ -124,7 +77,7 @@ public:
         }
         
         // Даем время на создание файлов
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
         
         // Устанавливаем направление (вход)
         std::string direction_path = "/sys/class/gpio/gpio" + std::to_string(gpio_number_) + "/direction";
@@ -150,11 +103,10 @@ public:
         value_file >> value;
         value_file.close();
         
-        // '0' = LOW, '1' = HIGH (ASCII)
         if (active_low_) {
-            return value == '0';  // Active-low: нажата когда LOW
+            return value == '0';  
         } else {
-            return value == '1';  // Active-high: нажата когда HIGH
+            return value == '1';
         }
     }
     
@@ -182,9 +134,12 @@ int main(int argc, char* argv[]) {
         SimpleButton gpio08(8, true);
         while(1){
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            led12.led_set(255);
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            led12.led_set(0);
+            if(led12.toggle()){
+                std::cout<<"Led12 toggles" << std::endl;
+            }
+            else{
+                std::cout<<"Led12 error" << std::endl;
+            }
 
             if(gpio08.isPressed()){
                 led11.led_set(255);
