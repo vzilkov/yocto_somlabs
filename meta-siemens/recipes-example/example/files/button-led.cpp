@@ -1,15 +1,20 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <string>
 #include <csignal>
 #include <gpiod.hpp> // ver 2.2.1
 
 #include "button-led.hpp"
+#include "ethernet.hpp"
 
 // // Конфигурация
 constexpr int LED_GPIO = 12;
 constexpr int BUTTON_GPIO = 8;   
 constexpr int BUTTON_CHIP = 0;
+
+constexpr int port_num = 8080;
+const std::string ip_adr = "192.168.31.27";
 
 SysfsLedController::SysfsLedController(const std::string& led_name) : ledName(led_name) {
     ledPath = "/sys/class/leds/" + ledName;
@@ -58,7 +63,6 @@ SysfsLedController::~SysfsLedController() {
     // stopBlinking();
     // turnOff(); // Гарантированно выключаем при выходе
 }
-
 
 class SimpleButton {
 private:
@@ -126,26 +130,53 @@ int main(int argc, char* argv[]) {
     std::cout << "LED: GPIO" << LED_GPIO << " (sysfs)" << std::endl;
     std::cout << "Button: GPIO" << BUTTON_GPIO << " (libgpiod)" << std::endl;
     std::cout << "========================================" << std::endl;
+
+    SmartClient client;
+    if (!client.connectToServer(ip_adr, port_num)) {
+        std::cerr << "Failed to connect to server" << std::endl;
+        return 1;
+    }
+
+    SysfsLedController led12("LED-IO-12");
+
+    client.startReceiving();
+    
+    std::string message = "Message from BOARD ULL6! ";
+    int cnt = 0;
+    while (client.isConnected()) {
+        cnt++;
+                
+        if (!client.sendData(message + std::to_string(cnt) + "\n")) // false if error
+        {
+            std::cerr << "Failed to send message" << std::endl;
+            break;
+        }
+        led12.toggle();
         
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    
+    client.disconnect();
+
     try {
-       SysfsLedController led12("LED-IO-12");
-       SysfsLedController led11("LED-IO-11");
-    //    ButtonLibgpiod gpio08(0,8,50);
+        
+        SysfsLedController led11("LED-IO-11");
+        //    ButtonLibgpiod gpio08(0,8,50);
         SimpleButton gpio08(8, true);
         while(1){
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if(led12.toggle()){
-                std::cout<<"Led12 toggles" << std::endl;
-            }
-            else{
-                std::cout<<"Led12 error" << std::endl;
-            }
+            // if(led12.toggle()){
+            //     // std::cout<<"Led12 toggles" << std::endl;
+            // }
+            // else{
+            //     // std::cout<<"Led12 error" << std::endl;
+            // }
 
             if(gpio08.isPressed()){
-                led11.led_set(255);
+                led11.switchON();
             }
             else{
-                led11.led_set(0);
+                led11.switchOFF();
             }
        }
 
