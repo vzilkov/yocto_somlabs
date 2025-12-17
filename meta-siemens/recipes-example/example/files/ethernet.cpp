@@ -6,193 +6,351 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <chrono>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #include "ethernet.hpp"
 
-void SmartSocket::socket_deleter(int* fd) {
+static void socket_deleter(int* fd) {
     if (fd && *fd >= 0) {
-        close(*fd);
-        std::cout << "Socket closed: " << *fd << std::endl;
+        ::close(*fd);
+        std::cout << "[ETHERNET] Socket closed: " << *fd << std::endl;
     }
     delete fd;
 }
 
-SmartSocket::SmartSocket() : 
-    socket_fd_(nullptr, socket_deleter) {
-    socket_fd_.reset(new int(-1));
-}
-    
-SmartSocket::SmartSocket(int fd) : 
-    socket_fd_(nullptr, socket_deleter) {
-    socket_fd_.reset(new int(fd));
-}
-    
+SmartSocket::SmartSocket() 
+    : socket_fd_(new int(-1), socket_deleter) {}
+
+SmartSocket::SmartSocket(int fd) 
+    : socket_fd_(new int(fd), socket_deleter) {}
+
 bool SmartSocket::create() {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
-    
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "[ETHERNET] Failed to create socket: " 
+                  << strerror(errno) << std::endl;
+        return false;
+    }
     socket_fd_.reset(new int(fd));
     return true;
 }
-    
+
 int SmartSocket::get() const {
     return socket_fd_ ? *socket_fd_ : -1;
 }
-    
+
 void SmartSocket::reset(int fd) {
     socket_fd_.reset(new int(fd));
 }
-    
+
 bool SmartSocket::isValid() const {
     return socket_fd_ && *socket_fd_ >= 0;
 }
 
-SmartClient::SmartClient() = default;
+void SmartSocket::close() {
+    if (socket_fd_ && *socket_fd_ >= 0) {
+        ::close(*socket_fd_);
+        socket_fd_.reset(new int(-1));
+    }
+}
 
-bool SmartClient::connectToServer(const std::string& server_ip, int port) {
-    // Создаем сокет
-    if (!client_socket_.create()) {
-        std::cerr << "Failed to create socket" << std::endl;
+SmartClient::SmartClient() {
+    signal(SIGPIPE, SIG_IGN);
+    socket_ = std::make_unique<SmartSocket>();
+}
+
+SmartClient::~SmartClient() {
+    stop();
+}
+
+bool SmartClient::checkConnection() {
+    if (!socket_->isValid()) {
         return false;
     }
     
+    // Проверка через getsockopt
+    int error = 0;
+    socklen_t len = sizeof(error);
+    
+    if (getsockopt(socket_->get(), SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
+        return false;
+    }
+    
+    return (error == 0);
+}
+
+void SmartClient::cleanup() {
+    if (socket_->isValid()) {
+        shutdown(socket_->get(), SHUT_RDWR);
+        socket_->close();
+    }
+    socket_.reset(new SmartSocket());
+    connected_ = false;
+    running_ = false;
+}
+
+bool SmartClient::start(const std::string& ip, int port) {
+    // Если уже работает - останавливаем
+    if (running_) {
+        stop();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    std::cout << "[ETHERNET] Starting client..." << std::endl;
+    
+    // Создаем сокет
+    if (!socket_->create()) {
+        std::cerr << "[ETHERNET] Failed to create socket" << std::endl;
+        return false;
+    }
+    
+    // Настраиваем адрес сервера
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     
-    if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid address or address not supported" << std::endl;
+    if (inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr) <= 0) {
+        std::cerr << "[ETHERNET] Invalid IP address: " << ip << std::endl;
+        cleanup();
         return false;
     }
     
-    // Устанавливаем таймаут на подключение
-    struct timeval tv;
-    tv.tv_sec = 5;  // 5 секунд таймаут
-    tv.tv_usec = 0;
-    setsockopt(client_socket_.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // Устанавливаем таймауты (10 секунд)
+    struct timeval timeout;
+    timeout.tv_sec = 10;
+    timeout.tv_usec = 0;
     
-    // Подключаемся к серверу
-    if (connect(client_socket_.get(), (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cerr << "Connection failed" << std::endl;
+    setsockopt(socket_->get(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socket_->get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    
+    // Включаем keepalive
+    int keepalive = 1;
+    setsockopt(socket_->get(), SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    
+    // Подключаемся
+    std::cout << "[ETHERNET] Connecting to " << ip << ":" << port << "..." << std::endl;
+    
+    if (::connect(socket_->get(), (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        std::cerr << "[ETHERNET] Connection failed: " << strerror(errno) << std::endl;
+        cleanup();
         return false;
     }
     
-    connected_.store(true);
-    std::cout << "Connected to server " << server_ip << ":" << port << std::endl;
+    connected_ = true;
+    running_ = true;
     
+    // Сбрасываем счетчик
+    message_counter_ = 0;
+    
+    // Запускаем потоки
+    sender_thread_ = std::thread(&SmartClient::sendingLoop, this);
+    receiver_thread_ = std::thread(&SmartClient::receivingLoop, this);
+    
+    std::cout << "[ETHERNET] Client started successfully!" << std::endl;
     return true;
 }
 
-bool SmartClient::sendData(const std::string& data) {
-    if (!connected_.load() || !client_socket_.isValid()) {
-        std::cerr << "Not connected to server" << std::endl;
-        return false;
-    }
+void SmartClient::sendingLoop() {
+    std::cout << "[ETHERNET] Sender thread started" << std::endl;
     
-    ssize_t bytes_sent = send(client_socket_.get(), data.c_str(), data.length(), 0);
+    int failed_heartbeats = 0;
+    const int MAX_FAILED_HEARTBEATS = 3;
     
-    if (bytes_sent < 0) {
-        std::cerr << "Failed to send data" << std::endl;
-        return false;
-    }
-    
-    std::cout << "Sent " << bytes_sent << " bytes to server" << std::endl;
-    return true;
-}
-
-void SmartClient::receive_impl() {
-    char buffer[1024];
-    
-    while (running_.load() && connected_.load()) {
-        memset(buffer, 0, sizeof(buffer));
+    while (running_ && connected_) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
         
-        // Читаем данные от сервера
-        ssize_t bytes_received = recv(client_socket_.get(), buffer, sizeof(buffer) - 1, 0);
+        if (!running_ || !connected_) break;
         
-        if (bytes_received > 0) {
-            std::cout << "Received from server: " << buffer << std::endl;
+        // Heartbeat сообщение
+        int counter = ++message_counter_;
+        std::string message = "PING#" + std::to_string(counter) + "\n";
+        
+        // Отправляем с коротким таймаутом
+        struct timeval tv = {2, 0}; // 2 секунды таймаут
+        setsockopt(socket_->get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        
+        ssize_t sent = send(socket_->get(), message.c_str(), message.length(), MSG_NOSIGNAL);
+        
+        // Восстанавливаем таймаут
+        tv.tv_sec = 10;
+        setsockopt(socket_->get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        
+        if (sent < 0) {
+            failed_heartbeats++;
+            std::cerr << "[ETHERNET] Heartbeat failed (" << failed_heartbeats 
+                      << "/" << MAX_FAILED_HEARTBEATS << "): " << strerror(errno) << std::endl;
             
-            // Здесь можно добавить обработку полученных данных
-            // Например, вызов callback-функции
-            
-        } else if (bytes_received == 0) {
-            std::cout << "Server disconnected" << std::endl;
-            connected_.store(false);
-            running_.store(false);
-            break;
-        } else {
-            // Таймаут или ошибка
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Это таймаут, просто продолжаем
-                continue;
-            } else {
-                std::cerr << "Receive error" << std::endl;
-                connected_.store(false);
-                running_.store(false);
+            if (failed_heartbeats >= MAX_FAILED_HEARTBEATS) {
+                std::cerr << "[ETHERNET] Too many failed heartbeats, connection dead!" << std::endl;
+                connected_ = false;
+                running_ = false;
                 break;
             }
+        } else if (sent == 0) {
+            std::cerr << "[ETHERNET] Connection closed by server" << std::endl;
+            connected_ = false;
+            running_ = false;
+            break;
+        } else {
+            // Успешная отправка - сбрасываем счетчик
+            if (failed_heartbeats > 0) {
+                failed_heartbeats = 0;
+                std::cout << "[ETHERNET] Heartbeat recovered" << std::endl;
+            }
+            std::cout << "[ETHERNET] Heartbeat #" << counter << " sent" << std::endl;
         }
     }
     
-    std::cout << "Receive thread exiting" << std::endl;
+    std::cout << "[ETHERNET] Sender thread stopped" << std::endl;
 }
 
-void SmartClient::startReceiving() {
-    if (!connected_.load()) {
-        std::cerr << "Not connected to server" << std::endl;
-        return;
-    }
+void SmartClient::receivingLoop() {
+    std::cout << "[ETHERNET] Receiver thread started" << std::endl;
     
-    if (running_.load()) {
-        std::cout << "Receive thread already running" << std::endl;
-        return;
-    }
+    char buffer[1024];
     
-    running_.store(true);
-    
-    // Создаем поток для приема данных
-    receive_thread_ = std::thread([this]() {
-        this->receive_impl();
-    });
-    
-    // Detach поток - он будет работать независимо
-    receive_thread_.detach();
-    
-    std::cout << "Started receiving data from server" << std::endl;
-}
-
-void SmartClient::disconnect() {
-    if (connected_.load()) {
-        std::cout << "Disconnecting from server..." << std::endl;
-        running_.store(false);
-        connected_.store(false);
+    while (running_ && connected_) {
+        if (!running_ || !connected_) break;
         
-        if (client_socket_.isValid()) {
-            close(client_socket_.get());
+        memset(buffer, 0, sizeof(buffer));
+        
+        // Проверяем соединение перед приемом
+        if (!checkConnection()) {
+            std::cerr << "[ETHERNET] Connection lost in receiver" << std::endl;
+            connected_ = false;
+            running_ = false;
+            break;
         }
         
+        // Пытаемся принять данные
+        ssize_t received = recv(socket_->get(), buffer, sizeof(buffer) - 1, 0);
+        
+        if (received > 0) {
+            buffer[received] = '\0';
+            std::cout << "[ETHERNET] Received " << received << " bytes: " << buffer << std::endl;
+        } else if (received == 0) {
+            std::cout << "[ETHERNET] Server disconnected" << std::endl;
+            connected_ = false;
+            running_ = false;
+            break;
+        } else {
+            int err = errno;
+            
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                // Таймаут - нормально
+                continue;
+            } else if (err == ECONNRESET || err == EPIPE || err == ENOTCONN) {
+                std::cerr << "[ETHERNET] Connection error in receiver: " << strerror(err) << std::endl;
+                connected_ = false;
+                running_ = false;
+                break;
+            } else {
+                std::cerr << "[ETHERNET] Receive error: " << strerror(err) << std::endl;
+                // Не разрываем соединение при других ошибках
+            }
+        }
+        
+        // Короткая пауза
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        std::cout << "Disconnected from server" << std::endl;
     }
+    
+    std::cout << "[ETHERNET] Receiver thread stopped" << std::endl;
 }
 
-bool SmartClient::isConnected() const {
-    return connected_.load();
+void SmartClient::stop() {
+    if (!running_) return;
+    
+    std::cout << "[ETHERNET] Stopping client..." << std::endl;
+    
+    running_ = false;
+    connected_ = false;
+    
+    // Даем время потокам завершиться
+    if (sender_thread_.joinable()) {
+        sender_thread_.join();
+        std::cout << "[ETHERNET] Sender thread joined" << std::endl;
+    }
+    
+    if (receiver_thread_.joinable()) {
+        receiver_thread_.join();
+        std::cout << "[ETHERNET] Receiver thread joined" << std::endl;
+    }
+    
+    // Очищаем сокет
+    cleanup();
+    
+    std::cout << "[ETHERNET] Client stopped" << std::endl;
 }
 
 bool SmartClient::isRunning() const {
-    return running_.load();
+    return running_;
 }
 
-SmartClient::~SmartClient() {
-    std::cout << "SmartClient shutting down..." << std::endl;
-    disconnect();
-    
-    if (receive_thread_.joinable()) {
-        receive_thread_.join();
+bool SmartClient::isConnected() const {
+    if (!running_ || !connected_ || !socket_->isValid()) {
+        return false;
     }
     
-    std::cout << "SmartClient destroyed" << std::endl;
+    int socket_error = 0;
+    socklen_t len = sizeof(socket_error);
+    
+    if (getsockopt(socket_->get(), SOL_SOCKET, SO_ERROR, &socket_error, &len) < 0) {
+        // Не удалось проверить сокет - считаем что соединение разорвано
+        return false;
+    }
+    
+    if (socket_error != 0) {
+        // Сокет имеет ошибку (ECONNRESET, EPIPE и т.д.)
+        return false;
+    }
+    
+    struct timeval tv = {0, 10000}; // 10ms таймаут
+    fd_set read_fds, except_fds;
+    FD_ZERO(&read_fds);
+    FD_ZERO(&except_fds);
+    FD_SET(socket_->get(), &read_fds);
+    FD_SET(socket_->get(), &except_fds);
+    
+    int result = select(socket_->get() + 1, &read_fds, nullptr, &except_fds, &tv);
+    
+    if (result < 0) {
+        // Ошибка select
+        return false;
+    }
+    
+    if (FD_ISSET(socket_->get(), &except_fds)) {
+        // Исключительная ситуация на сокете
+        return false;
+    }
+    
+    return true;
+}
+
+int SmartClient::getMessageCount() const {
+    return message_counter_;
+}
+
+bool SmartClient::checkEthernetLink() {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return false;
+    
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, "eth0", IFNAMSIZ - 1);
+    
+    // Получаем флаги интерфейса
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+        close(sock);
+        return false;
+    }
+    
+    bool is_up = (ifr.ifr_flags & IFF_UP) != 0;
+    bool is_running = (ifr.ifr_flags & IFF_RUNNING) != 0;
+    
+    close(sock);
+    return is_up && is_running;
 }
