@@ -10,3 +10,15 @@
 
 # Add in the build/conf/local.conf:
 # IMAGE_INSTALL:append = " libgpiod libgpiod-dev libgpiod-tools button-led"
+
+Description:
+Switch ON the board.
+Board sends to HOST data, requirements check in design requirement.
+
+Server in ubuntu terminal: nc -l 8080
+
+Board schematic
+https://somlabs.com/wp-content/uploads/VisionCB-6ULL-STD-v2-0_schematics.pdf
+
+In case of stop application under the root:
+systemctl stop button-led
