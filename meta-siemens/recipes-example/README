@@ -10,3 +10,35 @@
 
 # Add in the build/conf/local.conf:
 # IMAGE_INSTALL:append = " libgpiod libgpiod-dev libgpiod-tools button-led"
+
+Description:
+Version 0.0.1
+Switch ON the board.
+Board sends to HOST data, requirements check in design requirement.
+
+Server in ubuntu terminal: nc -l 8080
+
+Board schematic
+https://somlabs.com/wp-content/uploads/VisionCB-6ULL-STD-v2-0_schematics.pdf
+
+In case of stop application under the root:
+systemctl stop button-led
+
+Functional requirements (what I did and what to be done)
+rk_func_boot_idle - done
+After booting target shall blink LED1 with a frequency of 2Hz.
+rk_func_boot_connection_start - done
+As soon as connection with host is established LED2 shall be switched on and LED1 off.
+rk_func_boot_connection_stop - done
+As soon as target recognises a lost connection LED2 shall be switched off and LED1 returns to the
+state as defined in rk_func_boot_idle.
+rk_func_communication_confirmation - done
+Each sent or received data package shall be confirmed by blinking LED2 with a frequency of 4Hz.
+rk_func_communication_sensor - not done, just imitation, without host.
+Every second data from Sensor (single or multiple) are sent to host.
+Host shall be able to check the integrity of received data and visualize it.
+rk_func_sensor_alert_define - not done, planned to implement it on host side.
+It shall be possible to define an alert if a defined range for sensor data will be exceeded.
+rk_func_sensor_alert_reaction - done
+Each alert shall be confirmed (e.g. using HWButton1) before the system returns to its working
+state.
