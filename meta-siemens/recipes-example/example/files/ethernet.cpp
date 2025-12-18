@@ -57,6 +57,11 @@ void SmartSocket::close() {
     }
 }
 
+void SmartClient::setupLed(SysfsLedController* led1, SysfsLedController* led2) {
+    led1_ = led1;
+    led2_ = led2;
+}
+
 SmartClient::SmartClient() {
     signal(SIGPIPE, SIG_IGN);
     socket_ = std::make_unique<SmartSocket>();
@@ -161,6 +166,41 @@ void SmartClient::sendingLoop() {
     const int MAX_FAILED_HEARTBEATS = 3;
     
     while (running_ && connected_) {
+        std::vector<uint8_t> data_to_send;
+        bool has_data = false;
+        
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            // Ждем 2 секунды или пока появится сообщение
+            if (queue_cv_.wait_for(lock, std::chrono::seconds(2),
+                [this] { return !send_queue_.empty() || !running_; })) {
+                
+                if (!running_) break;
+                
+                if (!send_queue_.empty()) {
+                    data_to_send = std::move(send_queue_.front());
+                    send_queue_.pop();
+                    has_data = true;
+                    std::cout << "[ETHERNET] Got data from queue (" 
+                              << data_to_send.size() << " bytes)" << std::endl;
+                }
+            }
+        }
+        
+        if (!running_ || !connected_) break;
+        
+        if (has_data) {
+            // Отправляем данные из очереди
+            if (!sendDataInternal(data_to_send)) {
+                std::cerr << "[ETHERNET] Failed to send queued data" << std::endl;
+                connected_ = false;
+                running_ = false;
+                break;
+            }
+            continue; // Переходим к следующей итерации
+        }
+        
+        // Если очередь пуста - heartbeat
         std::this_thread::sleep_for(std::chrono::seconds(2));
         
         if (!running_ || !connected_) break;
@@ -201,6 +241,8 @@ void SmartClient::sendingLoop() {
                 failed_heartbeats = 0;
                 std::cout << "[ETHERNET] Heartbeat recovered" << std::endl;
             }
+            const unsigned int hz=4;
+            led2_->blink(hz);
             std::cout << "[ETHERNET] Heartbeat #" << counter << " sent" << std::endl;
         }
     }
@@ -232,6 +274,8 @@ void SmartClient::receivingLoop() {
         if (received > 0) {
             buffer[received] = '\0';
             std::cout << "[ETHERNET] Received " << received << " bytes: " << buffer << std::endl;
+            const unsigned int hz=4;
+            led2_->blink(hz);
         } else if (received == 0) {
             std::cout << "[ETHERNET] Server disconnected" << std::endl;
             connected_ = false;
@@ -327,6 +371,72 @@ bool SmartClient::isConnected() const {
         return false;
     }
     
+    return true;
+}
+
+bool SmartClient::sendData(const std::vector<uint8_t>& data) {
+    if (!isConnected()) {
+        std::cerr << "[ETHERNET] Cannot send: not connected" << std::endl;
+        return false;
+    }
+    
+    if (data.empty()) {
+        std::cout << "[ETHERNET] Warning: trying to send empty data" << std::endl;
+        return true;
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        send_queue_.push(data);
+    }
+    
+    // Будим поток отправки
+    queue_cv_.notify_one();
+    
+    std::cout << "[ETHERNET] Data queued for sending (" << data.size() << " bytes)" << std::endl;
+    return true;
+}
+
+bool SmartClient::sendDataInternal(const std::vector<uint8_t>& data) {
+    if (!connected_ || !socket_->isValid() || data.empty()) {
+        return false;
+    }
+    
+    // Устанавливаем таймаут отправки
+    struct timeval tv = {5, 0};
+    setsockopt(socket_->get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    
+    // Отправляем данные
+    ssize_t total_sent = 0;
+    const uint8_t* buffer = data.data();
+    size_t total_size = data.size();
+    
+    while (total_sent < total_size) {
+        ssize_t sent = send(socket_->get(), 
+                           buffer + total_sent, 
+                           total_size - total_sent, 
+                           MSG_NOSIGNAL);
+        
+        if (sent < 0) {
+            int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                continue;
+            }
+            std::cerr << "[ETHERNET] Send error: " << strerror(err) << std::endl;
+            return false;
+        } else if (sent == 0) {
+            std::cerr << "[ETHERNET] Connection closed during send" << std::endl;
+            return false;
+        }
+        
+        total_sent += sent;
+    }
+    
+    // Восстанавливаем таймаут
+    tv.tv_sec = 10;
+    setsockopt(socket_->get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    
+    std::cout << "[ETHERNET] Successfully sent " << total_size << " bytes" << std::endl;
     return true;
 }
 

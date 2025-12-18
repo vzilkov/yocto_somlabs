@@ -6,6 +6,11 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+
+#include "button-led.hpp"
 
 class SmartSocket {
 private:
@@ -37,11 +42,20 @@ private:
     std::thread sender_thread_;
     std::thread receiver_thread_;
     std::atomic<int> message_counter_{0};
+
+    std::queue<std::vector<uint8_t>> send_queue_;
+    mutable std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
     
     void sendingLoop();
     void receivingLoop();
     bool checkConnection();
     void cleanup();
+    
+    SysfsLedController* led1_ = nullptr;
+    SysfsLedController* led2_ = nullptr;
+    
+    bool sendDataInternal(const std::vector<uint8_t>& data);
     
 public:
     SmartClient();
@@ -58,6 +72,10 @@ public:
     
     // Получить статистику
     int getMessageCount() const;
+
+    bool sendData(const std::vector<uint8_t>& data);
+
+    void setupLed(SysfsLedController* led1, SysfsLedController* led2);
     
     // Удаляем копирование
     SmartClient(const SmartClient&) = delete;
