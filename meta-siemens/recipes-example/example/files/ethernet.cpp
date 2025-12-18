@@ -197,6 +197,10 @@ void SmartClient::sendingLoop() {
                 running_ = false;
                 break;
             }
+            else{
+                const unsigned int hz=4;
+                led2_->blink(hz); // rk_func_communication_confirmation
+            }
             continue; // Переходим к следующей итерации
         }
         
@@ -242,7 +246,7 @@ void SmartClient::sendingLoop() {
                 std::cout << "[ETHERNET] Heartbeat recovered" << std::endl;
             }
             const unsigned int hz=4;
-            led2_->blink(hz);
+            led2_->blink(hz); // rk_func_communication_confirmation
             std::cout << "[ETHERNET] Heartbeat #" << counter << " sent" << std::endl;
         }
     }
@@ -275,7 +279,7 @@ void SmartClient::receivingLoop() {
             buffer[received] = '\0';
             std::cout << "[ETHERNET] Received " << received << " bytes: " << buffer << std::endl;
             const unsigned int hz=4;
-            led2_->blink(hz);
+            led2_->blink(hz); // rk_func_communication_confirmation
         } else if (received == 0) {
             std::cout << "[ETHERNET] Server disconnected" << std::endl;
             connected_ = false;
