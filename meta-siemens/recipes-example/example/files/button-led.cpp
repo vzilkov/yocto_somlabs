@@ -1,15 +1,20 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <string>
 #include <csignal>
 #include <gpiod.hpp> // ver 2.2.1
 
 #include "button-led.hpp"
+#include "ethernet.hpp"
 
 // // Конфигурация
 constexpr int LED_GPIO = 12;
 constexpr int BUTTON_GPIO = 8;   
 constexpr int BUTTON_CHIP = 0;
+
+constexpr int port_num = 8080;
+const std::string ip_adr = "192.168.31.27";
 
 SysfsLedController::SysfsLedController(const std::string& led_name) : ledName(led_name) {
     ledPath = "/sys/class/leds/" + ledName;
@@ -25,7 +30,7 @@ bool SysfsLedController::led_set(const char val){
         }
         brightness_ = val;
         *brightnessFile << static_cast<int>(brightness_);
-        std::cout << ledName << " sent value " << brightness_ << std::endl;
+        // std::cout << ledName << " sent value " << brightness_ << std::endl;
         return true;
     }
     catch(...){
@@ -58,7 +63,6 @@ SysfsLedController::~SysfsLedController() {
     // stopBlinking();
     // turnOff(); // Гарантированно выключаем при выходе
 }
-
 
 class SimpleButton {
 private:
@@ -119,33 +123,148 @@ public:
     }
 };
 
+std::atomic<bool> program_running{true};
+
+void signalHandler(int signal) {
+    std::cout << "\n[MAIN] Received signal " << signal << ", shutting down..." << std::endl;
+    program_running = false;
+}
+
 int main(int argc, char* argv[]) {
+    std::signal(SIGINT, signalHandler);
+
     std::cout << "========================================" << std::endl;
     std::cout << "Button-LED Control Program" << std::endl;
     std::cout << "Built for VisionCB-6ULL" << std::endl;
     std::cout << "LED: GPIO" << LED_GPIO << " (sysfs)" << std::endl;
     std::cout << "Button: GPIO" << BUTTON_GPIO << " (libgpiod)" << std::endl;
     std::cout << "========================================" << std::endl;
-        
-    try {
-       SysfsLedController led12("LED-IO-12");
-       SysfsLedController led11("LED-IO-11");
-    //    ButtonLibgpiod gpio08(0,8,50);
-        SimpleButton gpio08(8, true);
-        while(1){
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if(led12.toggle()){
-                std::cout<<"Led12 toggles" << std::endl;
+
+    SysfsLedController led12("LED-IO-12");
+    SysfsLedController led11("LED-IO-11");
+    SimpleButton gpio08(8, true);
+
+    SmartClient client;
+    std::string statement = "normal";  
+    int connection_attempts = 0;  
+    const int MAX_ATTEMPTS = 5;
+    
+    while(program_running){
+        static bool eth_link_was_up = true;
+        bool eth_link_is_up = client.checkEthernetLink();
+
+        if(eth_link_is_up == false && eth_link_was_up == true){
+            std::cerr << "[MAIN] ETH0 LINK DOWN - Cable disconnected!" << std::endl;
+            statement = "alert";
+            if (client.isRunning()) {
+                client.stop();
             }
-            else{
-                std::cout<<"Led12 error" << std::endl;
+            led11.switchON();
+        }
+        else if (eth_link_was_up == false && eth_link_is_up == true) {
+            // Кабель подключен
+            std::cout << "[MAIN] ETH0 LINK UP - Cable connected" << std::endl;
+        }
+
+        eth_link_was_up = eth_link_is_up;
+
+        if(statement == "normal")
+        {
+            led11.switchOFF();
+            if (!client.isRunning())
+            {
+                std::cout << "Starting client..." << std::endl;// всё время заходит сюда до проверки соединения не доходит
+                if (client.start(ip_adr, port_num)) {
+                    std::cout << "Client started successfully" << std::endl;
+                    connection_attempts = 0;
+                } else {
+                    std::cout << "Failed to start client" << std::endl;
+                    connection_attempts++;
+
+                    
+                }
             }
 
-            if(gpio08.isPressed()){
-                led11.led_set(255);
+            if(!client.isConnected()){
+                std::cerr << "[MAIN] Ethernet connection lost!" << std::endl;
+                client.stop();
+                connection_attempts++;
+                if (connection_attempts >= MAX_ATTEMPTS) {
+                    std::cerr << "[MAIN] Too many failed attempts, switching to ALERT" << std::endl;
+                    statement = "alert";
+                    led11.switchON();
+                    continue;
+                }
             }
             else{
-                led11.led_set(0);
+                if(connection_attempts > 0){
+                    static auto last_reset_time = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_reset_time).count() > 10) {
+                        std::cout << "[MAIN] Connection stable for 10s, resetting attempt counter" << std::endl;
+                        connection_attempts = 0;
+                        last_reset_time = now;
+                    }
+                }
+            }
+        }
+        else if(statement == "alert")
+        {
+            led11.switchON();
+            std::cout << "[ETHERNET] Catched ETH disconnection" << std::endl;
+            if (client.isRunning()) {
+                std::cout << "[MAIN] Stopping client in ALERT mode" << std::endl;
+                client.stop();
+            }
+        }// alert end if
+
+        if(gpio08.isPressed()) {
+            std::cout << "[MAIN] Button pressed" << std::endl;
+            if(statement == "alert") {
+                std::cout << "[MAIN] switching to NORMAL" << std::endl;
+                statement = "normal";
+                connection_attempts = 0;
+            } else {
+                // std::cout << "[MAIN] Button pressed, switching to ALERT" << std::endl;
+                // statement = "alert";
+            }
+        }
+
+        std::cout   << "[STATUS] State: " << statement 
+                    << ", ETH running: " << client.isRunning()
+                    << ", ETH connected: " << client.isConnected() 
+                    << ", Attempts: " << connection_attempts << std::endl;
+
+        led12.toggle();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+
+    std::cout << "=== Ethernet finished ===" << std::endl;
+    return 0;
+    std::string message = "Message from BOARD ULL6! ";
+    //[STATUS] State: normal, ETH running: 0, ETH connected: 0, Attempts: 32 // not working
+    // [STATUS] State: normal, ETH running: 1, ETH connected: 1, Attempts: 0 // working well
+    // идея сделать этот поток как управляющий
+    // тут машина состояний
+    try {
+        
+        
+        // ButtonLibgpiod gpio08(0,8,50);
+        // SimpleButton gpio08(8, true);
+        while(1){
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // if(led12.toggle()){
+            //     // std::cout<<"Led12 toggles" << std::endl;
+            // }
+            // else{
+            //     // std::cout<<"Led12 error" << std::endl;
+            // }
+
+            if(gpio08.isPressed()){
+                led11.switchON();
+            }
+            else{
+                led11.switchOFF();
             }
        }
 

@@ -26,8 +26,8 @@ public:
     SysfsLedController& operator=(SysfsLedController&&) noexcept = default;
     
     bool led_set(const char val);
-    bool turnOn();
-    bool turnOff();
+    bool switchON();
+    bool switchOFF();
     bool toggle();
 };
 
